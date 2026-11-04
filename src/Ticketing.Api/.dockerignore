@@ -1,0 +1,6 @@
+# Local build output and IDE files must not end up in the build context.
+bin/
+obj/
+*.user
+Dockerfile
+.dockerignore

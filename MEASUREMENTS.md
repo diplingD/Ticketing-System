@@ -1,0 +1,70 @@
+# MEASUREMENTS — experiment log
+
+Every experiment: first provoke and measure the problem, then fix it and measure again.
+
+---
+
+### [Phase 1] Naive purchase — race condition and overselling
+
+**Problem.** The purchase follows a *read → check in the application → write* pattern. Everything runs inside
+a transaction, but under `READ COMMITTED` a transaction does not stop multiple requests from reading the same
+counter at the same time.
+
+Example with one ticket left:
+
+| Time | Request A | Request B |
+|---|---|---|
+| t1 | `SELECT` → `available = 1` | |
+| t2 | | `SELECT` → `available = 1` |
+| t3 | check `1 > 0` ✔ | check `1 > 0` ✔ |
+| t4 | `UPDATE SET available = 0`, `INSERT` order, `COMMIT` | |
+| t5 | | `UPDATE` waits for the row lock, then after A commits writes `available = 0`, `INSERT` order, `COMMIT` |
+
+Result: **2 orders for 1 ticket**. The `UPDATE` writes a value computed in the application (`@newAvailable`),
+so B overwrites A's write (**lost update**). The counter looks correct; the overselling only shows up when the
+rows in `orders` are counted (`GET /events/{id}` → `soldTickets > totalTickets`).
+
+**Code** (`Repository/EventRepository.cs`, `PurchaseAsync`):
+
+```csharp
+// NAIVE on purpose (Phase 1 starting point): read -> check in app -> write the computed value.
+// The transaction does NOT protect us: under READ COMMITTED two requests can both read
+// available = 1, both pass the check, and both write 0 (lost update) -> two orders for one ticket.
+public async Task<PurchaseResult> PurchaseAsync(long eventId, string userId, CancellationToken cancellationToken)
+{
+    await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+    await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+    // 1. Read
+    var available = await connection.QuerySingleOrDefaultAsync<int?>(new CommandDefinition(
+        "SELECT available_tickets FROM events WHERE id = @eventId",
+        new { eventId }, transaction, cancellationToken: cancellationToken));
+
+    // 2. Check in application code, on a value that may already be stale.
+    //    Returning early disposes the transaction, which rolls it back.
+    if (available is null)
+        return PurchaseResult.EventNotFound;
+
+    if (available <= 0)
+        return PurchaseResult.SoldOut;
+
+    // 3. Write the value computed in the app (not "available_tickets - 1" in SQL).
+    await connection.ExecuteAsync(new CommandDefinition(
+        "UPDATE events SET available_tickets = @newAvailable WHERE id = @eventId",
+        new { eventId, newAvailable = available.Value - 1 }, transaction, cancellationToken: cancellationToken));
+
+    var orderId = await connection.ExecuteScalarAsync<long>(new CommandDefinition(
+        "INSERT INTO orders (event_id, user_id) VALUES (@eventId, @userId) RETURNING id",
+        new { eventId, userId }, transaction, cancellationToken: cancellationToken));
+
+    await transaction.CommitAsync(cancellationToken);
+    return PurchaseResult.Success(orderId);
+}
+```
+
+- Load: _(filled in after the k6 test — VUs / RPS, duration, CPU/memory limits)_
+- Result: _(throughput, p95 latency, % errors, tickets sold vs. available)_
+- Bottleneck: _(what broke and why)_
+- Change: _(first fix — `SELECT ... FOR UPDATE`)_
+- After the change: _(new numbers)_
+- Trade-off: _(what we gained, what we lost)_

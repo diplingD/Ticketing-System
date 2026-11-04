@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:16
+    container_name: ticketing-db
+    environment:
+      POSTGRES_USER: ticketing
+      POSTGRES_PASSWORD: ticketing
+      POSTGRES_DB: ticketing
+    ports:
+      # host:container — mapping the port on my PC (5433) to the port on container (5432) because postgess is listening on 5432 (and we can't change that here)
+      # host port comes from .env (DB_HOST_PORT), defaults to 5432.
+      # On my PC 5432 is taken by a local Postgres, so .env sets it to 5433.
+      - "${DB_HOST_PORT:-5432}:5432"
+    volumes:
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ticketing -d ticketing"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 512M
+
+  api:
+    build: ./src/Ticketing.Api
+    container_name: ticketing-api
+    environment:
+      # Overrides the "Db" connection string; inside the Docker network the database is "db:5432".
+      ConnectionStrings__Db: "Host=db;Port=5432;Database=ticketing;Username=ticketing;Password=ticketing"
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
+
+volumes:
+  pgdata:
