@@ -1,0 +1,9 @@
+global:
+  # Our flash-sale test lasts only a few seconds, so we scrape every second.
+  # (Production usually uses 15-30s; 1s is fine for a local lab.)
+  scrape_interval: 1s
+
+scrape_configs:
+  - job_name: api
+    static_configs:
+      - targets: ["api:8080"]   # Prometheus calls GET http://api:8080/metrics

@@ -14,6 +14,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "infra", "infra", "{6F3C2A1E
 		.env = .env
 		db\init.sql = db\init.sql
 		MEASUREMENTS.md = MEASUREMENTS.md
+		load-tests\purchase.js = load-tests\purchase.js
+		monitoring\prometheus.yml = monitoring\prometheus.yml
 	EndProjectSection
 EndProject
 Global

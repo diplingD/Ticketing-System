@@ -62,9 +62,28 @@ public async Task<PurchaseResult> PurchaseAsync(long eventId, string userId, Can
 }
 ```
 
-- Load: _(filled in after the k6 test — VUs / RPS, duration, CPU/memory limits)_
-- Result: _(throughput, p95 latency, % errors, tickets sold vs. available)_
-- Bottleneck: _(what broke and why)_
-- Change: _(first fix — `SELECT ... FOR UPDATE`)_
-- After the change: _(new numbers)_
-- Trade-off: _(what we gained, what we lost)_
+**Load** (`load-tests/purchase.js`): N users each try to buy one ticket, all at the same moment
+(k6 `per-vu-iterations`, 1 iteration per VU). Event has 100 tickets.
+API: 0.5 CPU / 256 MB, Postgres: 1 CPU / 512 MB, Npgsql pool: default (max 100).
+
+**Result:**
+
+| Users | Sold (orders) | `available_tickets` after | Oversold | p95 latency | Throughput | Errors |
+|---|---|---|---|---|---|---|
+| 500 | **500** | 93 | **400** | 3.41 s | ~125 req/s | 0% |
+| 50 | 50 | **99** | 0 | — | — | 0% |
+
+- With 500 users, **every request "bought" a ticket**: 500 orders for 100 tickets, no 409 (sold out) at all.
+- The counter dropped only 7 times instead of 500 (lost update), so `available_tickets` claims 93 tickets are still free.
+- With 50 users nothing was oversold yet, but the counter is still wrong (99 instead of 50): the data is silently
+  corrupted and the next buyers would be oversold.
+- No errors, no 5xx: the system looks healthy while selling tickets it does not have.
+
+**Bottleneck / why:**
+- Plain `SELECT` does not wait for locks (MVCC), so almost all requests read the same value and pass the check.
+- The `UPDATE` does lock the row, but only *after* the check, and it writes a stale value computed in the app.
+- All writes go to **one hot row**; each transaction holds its row lock until `COMMIT`, so the writes run one
+  after another. That, plus requests waiting for a free pool connection, explains the ~3 s latency.
+  The naive version is both **wrong and slow**.
+
+**Next:** `SELECT ... FOR UPDATE` (lock the row when reading, not after the check).

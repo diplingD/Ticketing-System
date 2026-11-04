@@ -1,5 +1,6 @@
 using Dapper;
 using Npgsql;
+using Prometheus;
 using Ticketing.Api.Core.Interfaces;
 using Ticketing.Api.Repository;
 using Ticketing.Api.Services;
@@ -25,7 +26,14 @@ builder.Services.AddHealthChecks()
 
 var app = builder.Build();
 
+// Routing must run before UseHttpMetrics, so every metric gets the controller/action labels.
+app.UseRouting();
+// Counts requests and measures their duration (histogram) for every endpoint, labeled by status code.
+app.UseHttpMetrics();
+
 app.MapControllers();
 app.MapHealthChecks("/health");
+// GET /metrics: text format that Prometheus scrapes.
+app.MapMetrics();
 
 app.Run();

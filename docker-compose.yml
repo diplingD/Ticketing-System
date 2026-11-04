@@ -42,5 +42,27 @@ services:
           cpus: "0.5"
           memory: 256M
 
+  # Collects metrics: every scrape_interval it calls /metrics on each target and stores the time series.
+  # UI: http://localhost:9090
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: ticketing-prometheus
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - api
+
+  # Load testing tool. The "tools" profile keeps it out of "docker compose up";
+  # it runs only on demand: docker compose run --rm k6 run /scripts/purchase.js
+  k6:
+    image: grafana/k6:1.0.0
+    profiles: ["tools"]
+    volumes:
+      - ./load-tests:/scripts:ro
+    depends_on:
+      - api
+
 volumes:
   pgdata:
