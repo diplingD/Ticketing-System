@@ -1,11 +1,12 @@
 using Dapper;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using Ticketing.Api.Core.Interfaces;
 using Ticketing.Api.Core.Models;
 
 namespace Ticketing.Api.Repository;
 
-public sealed class EventRepository(NpgsqlDataSource dataSource) : IEventRepository
+public sealed class EventRepository(NpgsqlDataSource dataSource, IOptions<PurchaseOptions> options) : IEventRepository
 {
     public async Task<Event?> GetByIdAsync(long eventId, CancellationToken cancellationToken)
     {
@@ -29,10 +30,18 @@ public sealed class EventRepository(NpgsqlDataSource dataSource) : IEventReposit
             new CommandDefinition(sql, new { eventId }, cancellationToken: cancellationToken));
     }
 
+    public Task<PurchaseResult> PurchaseAsync(long eventId, string userId, CancellationToken cancellationToken)
+        => options.Value.Strategy switch
+        {
+            PurchaseStrategy.Naive => PurchaseNaiveAsync(eventId, userId, cancellationToken),
+            PurchaseStrategy.ForUpdate => PurchaseForUpdateAsync(eventId, userId, cancellationToken),
+            _ => throw new InvalidOperationException($"Unknown purchase strategy {options.Value.Strategy}.")
+        };
+
     // NAIVE on purpose (Phase 1 starting point): read -> check in app -> write the computed value.
     // The transaction does NOT protect us: under READ COMMITTED two requests can both read
     // available = 1, both pass the check, and both write 0 (lost update) -> two orders for one ticket.
-    public async Task<PurchaseResult> PurchaseAsync(long eventId, string userId, CancellationToken cancellationToken)
+    private async Task<PurchaseResult> PurchaseNaiveAsync(long eventId, string userId, CancellationToken cancellationToken)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
         await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
@@ -60,6 +69,39 @@ public sealed class EventRepository(NpgsqlDataSource dataSource) : IEventReposit
             new { eventId, userId }, transaction, cancellationToken: cancellationToken));
 
         await transaction.CommitAsync(cancellationToken);
+        return PurchaseResult.Success(orderId);
+    }
+
+    // PESSIMISTIC LOCKING: the same read -> check -> write, but the read locks the row (FOR UPDATE).
+    // A second transaction blocks on its SELECT until the first one commits, then reads the fresh value.
+    // Correct, but every purchase (and every "sold out" answer) waits in one queue for the same row.
+    private async Task<PurchaseResult> PurchaseForUpdateAsync(long eventId, string userId, CancellationToken cancellationToken)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        // 1. Read AND lock the row until COMMIT/ROLLBACK
+        var available = await connection.QuerySingleOrDefaultAsync<int?>(new CommandDefinition(
+            "SELECT available_tickets FROM events WHERE id = @eventId FOR UPDATE",
+            new { eventId }, transaction, cancellationToken: cancellationToken));
+
+        // 2. Check: safe now, nobody else can change the row while we hold the lock
+        if (available is null)
+            return PurchaseResult.EventNotFound;
+
+        if (available <= 0)
+            return PurchaseResult.SoldOut;
+
+        // 3. Write: the computed value is not stale anymore
+        await connection.ExecuteAsync(new CommandDefinition(
+            "UPDATE events SET available_tickets = @newAvailable WHERE id = @eventId",
+            new { eventId, newAvailable = available.Value - 1 }, transaction, cancellationToken: cancellationToken));
+
+        var orderId = await connection.ExecuteScalarAsync<long>(new CommandDefinition(
+            "INSERT INTO orders (event_id, user_id) VALUES (@eventId, @userId) RETURNING id",
+            new { eventId, userId }, transaction, cancellationToken: cancellationToken));
+
+        await transaction.CommitAsync(cancellationToken);   // releases the row lock
         return PurchaseResult.Success(orderId);
     }
 

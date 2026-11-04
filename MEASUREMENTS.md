@@ -12,13 +12,13 @@ counter at the same time.
 
 Example with one ticket left:
 
-| Time | Request A | Request B |
-|---|---|---|
-| t1 | `SELECT` → `available = 1` | |
-| t2 | | `SELECT` → `available = 1` |
-| t3 | check `1 > 0` ✔ | check `1 > 0` ✔ |
-| t4 | `UPDATE SET available = 0`, `INSERT` order, `COMMIT` | |
-| t5 | | `UPDATE` waits for the row lock, then after A commits writes `available = 0`, `INSERT` order, `COMMIT` |
+|Time|Request A|Request B|
+|-|-|-|
+|t1|`SELECT` → `available = 1`||
+|t2||`SELECT` → `available = 1`|
+|t3|check `1 > 0` ✔|check `1 > 0` ✔|
+|t4|`UPDATE SET available = 0`, `INSERT` order, `COMMIT`||
+|t5||`UPDATE` waits for the row lock, then after A commits writes `available = 0`, `INSERT` order, `COMMIT`|
 
 Result: **2 orders for 1 ticket**. The `UPDATE` writes a value computed in the application (`@newAvailable`),
 so B overwrites A's write (**lost update**). The counter looks correct; the overselling only shows up when the
@@ -68,22 +68,68 @@ API: 0.5 CPU / 256 MB, Postgres: 1 CPU / 512 MB, Npgsql pool: default (max 100).
 
 **Result:**
 
-| Users | Sold (orders) | `available_tickets` after | Oversold | p95 latency | Throughput | Errors |
-|---|---|---|---|---|---|---|
-| 500 | **500** | 93 | **400** | 3.41 s | ~125 req/s | 0% |
-| 50 | 50 | **99** | 0 | — | — | 0% |
+|Users|Sold (orders)|`available_tickets` after|Oversold|p95 latency|Throughput|Errors|
+|-|-|-|-|-|-|-|
+|500 (cold start)|**500**|93|**400**|3.41 s|~125 req/s|0%|
+|500 (warm)|**500**|95|**400**|2.80 s|~166 req/s|0%|
+|50|50|**99**|0|—|—|0%|
 
-- With 500 users, **every request "bought" a ticket**: 500 orders for 100 tickets, no 409 (sold out) at all.
-- The counter dropped only 7 times instead of 500 (lost update), so `available_tickets` claims 93 tickets are still free.
-- With 50 users nothing was oversold yet, but the counter is still wrong (99 instead of 50): the data is silently
-  corrupted and the next buyers would be oversold.
-- No errors, no 5xx: the system looks healthy while selling tickets it does not have.
+"Cold start" = first run after the API container starts (JIT compilation, empty connection pool).
+Comparisons below use warm runs.
+
+* With 500 users, **every request "bought" a ticket**: 500 orders for 100 tickets, no 409 (sold out) at all.
+* The counter dropped only 7 times instead of 500 (lost update), so `available_tickets` claims 93 tickets are still free.
+* With 50 users nothing was oversold yet, but the counter is still wrong (99 instead of 50): the data is silently
+corrupted and the next buyers would be oversold.
+* No errors, no 5xx: the system looks healthy while selling tickets it does not have.
 
 **Bottleneck / why:**
-- Plain `SELECT` does not wait for locks (MVCC), so almost all requests read the same value and pass the check.
-- The `UPDATE` does lock the row, but only *after* the check, and it writes a stale value computed in the app.
-- All writes go to **one hot row**; each transaction holds its row lock until `COMMIT`, so the writes run one
-  after another. That, plus requests waiting for a free pool connection, explains the ~3 s latency.
-  The naive version is both **wrong and slow**.
+
+* Plain `SELECT` does not wait for locks (MVCC), so almost all requests read the same value and pass the check.
+* The `UPDATE` does lock the row, but only *after* the check, and it writes a stale value computed in the app.
+* All writes go to **one hot row**; each transaction holds its row lock until `COMMIT`, so the writes run one
+after another. That, plus requests waiting for a free pool connection, explains the ~3 s latency.
+The naive version is both **wrong and slow**.
 
 **Next:** `SELECT ... FOR UPDATE` (lock the row when reading, not after the check).
+
+---
+
+### [Phase 1] Pessimistic locking — `SELECT ... FOR UPDATE`
+
+**Change.** The same read → check → write, but the read locks the row until the transaction ends:
+
+```sql
+SELECT available_tickets FROM events WHERE id = @eventId FOR UPDATE
+```
+
+A second request now waits on its `SELECT` until the first one commits, and then reads the fresh value.
+Read, check and write behave as one indivisible step.
+(Code: `PurchaseForUpdateAsync` in `Repository/EventRepository.cs`; selected with `PURCHASE_STRATEGY=ForUpdate`.)
+
+**Load:** same as above, 500 users, warm run.
+
+**After the change:**
+
+|Strategy|Sold|`available_tickets` after|200 / 409|p95 latency|Throughput|Errors|
+|-|-|-|-|-|-|-|
+|Naive|500 ❌|95|500 / 0|2.80 s|~166 req/s|0%|
+|**ForUpdate**|**100** ✅|**0**|**100 / 400**|**0.83 s**|**~482 req/s**|0%|
+
+* Correct: exactly 100 tickets sold, the counter matches the orders, the other 400 users got "sold out".
+* And ~3× faster than the naive version. Not because locking is cheap, but because the naive version did
+**5× more expensive work**: it accepted all 500 purchases, so it ran 500 commits with writes (WAL flush),
+one after another on the locked row. With `FOR UPDATE` only 100 transactions write; the other 400 read `0`,
+roll back and release the lock almost immediately.
+
+**Trade-off:**
+
+* ✅ Correct and simple: one extra keyword, the logic stays in readable application code.
+* ❌ Every request for this event waits in **one queue on one row**, including the ones that only find out it is
+sold out. Throughput is capped by how fast one row can be locked and released.
+* ❌ A waiting request holds a pool connection while it waits for the lock, so under higher load the pool
+runs out before the database CPU does.
+* ❌ Lock order matters as soon as a transaction locks more than one row (risk of deadlocks).
+
+**Next:** atomic `UPDATE ... WHERE available_tickets > 0` (check and write in one statement, no separate read).
+
