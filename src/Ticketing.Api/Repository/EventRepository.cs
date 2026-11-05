@@ -35,6 +35,7 @@ public sealed class EventRepository(NpgsqlDataSource dataSource, IOptions<Purcha
         {
             PurchaseStrategy.Naive => PurchaseNaiveAsync(eventId, userId, cancellationToken),
             PurchaseStrategy.ForUpdate => PurchaseForUpdateAsync(eventId, userId, cancellationToken),
+            PurchaseStrategy.Atomic => PurchaseAtomicAsync(eventId, userId, cancellationToken),
             _ => throw new InvalidOperationException($"Unknown purchase strategy {options.Value.Strategy}.")
         };
 
@@ -102,6 +103,45 @@ public sealed class EventRepository(NpgsqlDataSource dataSource, IOptions<Purcha
             new { eventId, userId }, transaction, cancellationToken: cancellationToken));
 
         await transaction.CommitAsync(cancellationToken);   // releases the row lock
+        return PurchaseResult.Success(orderId);
+    }
+
+    // ATOMIC UPDATE: no separate read. The check (WHERE) and the write (SET) are one statement.
+    // If two requests race for the last ticket, the second one waits for the row lock and then
+    // Postgres re-checks the WHERE on the fresh row: available is 0, so it updates 0 rows -> sold out.
+    private async Task<PurchaseResult> PurchaseAtomicAsync(long eventId, string userId, CancellationToken cancellationToken)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        // Check + decrement in one step. The new value is computed by the database, not by the app.
+        var updatedRows = await connection.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE events
+            SET available_tickets = available_tickets - 1
+            WHERE id = @eventId AND available_tickets > 0
+            """,
+            new { eventId }, transaction, cancellationToken: cancellationToken));
+
+        // 0 rows means: no free ticket OR no such event. Only on this path do we run one extra
+        // plain SELECT to tell the two apart. It takes no lock and waits for nobody.
+        if (updatedRows == 0)
+        {
+            var eventExists = await connection.ExecuteScalarAsync<bool>(new CommandDefinition(
+                "SELECT EXISTS (SELECT 1 FROM events WHERE id = @eventId)",
+                new { eventId }, transaction, cancellationToken: cancellationToken));
+
+            // we dont need commit because nothing is changed
+            // leaving transaction causes rollback (which releases lock the same way as commit - but update is not locking any row here anyway)
+            return eventExists ? PurchaseResult.SoldOut : PurchaseResult.EventNotFound;
+        }
+
+        // We own a ticket; record the order in the same transaction.
+        var orderId = await connection.ExecuteScalarAsync<long>(new CommandDefinition(
+            "INSERT INTO orders (event_id, user_id) VALUES (@eventId, @userId) RETURNING id",
+            new { eventId, userId }, transaction, cancellationToken: cancellationToken));
+
+        await transaction.CommitAsync(cancellationToken);   // releases the row lock taken by the UPDATE
         return PurchaseResult.Success(orderId);
     }
 

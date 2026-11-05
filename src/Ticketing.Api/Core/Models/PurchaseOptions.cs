@@ -3,7 +3,8 @@ namespace Ticketing.Api.Core.Models;
 public enum PurchaseStrategy
 {
     Naive,      // read -> check -> write (race condition, oversells)
-    ForUpdate   // SELECT ... FOR UPDATE (pessimistic locking)
+    ForUpdate,  // SELECT ... FOR UPDATE (pessimistic locking)
+    Atomic      // UPDATE ... WHERE available_tickets > 0 (check and write in one statement)
 }
 
 // Bound from the "Purchase" config section; in Docker: env var Purchase__Strategy=ForUpdate.
