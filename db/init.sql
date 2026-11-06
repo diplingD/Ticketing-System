@@ -4,7 +4,8 @@ CREATE TABLE events (
     id                BIGSERIAL PRIMARY KEY,
     name              TEXT NOT NULL,
     total_tickets     INT  NOT NULL CHECK (total_tickets >= 0),
-    available_tickets INT  NOT NULL
+    available_tickets INT  NOT NULL,
+    version           INT  NOT NULL DEFAULT 0   -- optimistic locking: incremented on every update
 );
 
 CREATE TABLE orders (

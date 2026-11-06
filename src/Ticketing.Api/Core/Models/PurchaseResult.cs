@@ -4,7 +4,8 @@ public enum PurchaseStatus
 {
     Success,
     SoldOut,
-    EventNotFound
+    EventNotFound,
+    Conflict        // optimistic locking: someone else changed the row first
 }
 
 public sealed record PurchaseResult(PurchaseStatus Status, long? OrderId = null)
@@ -12,4 +13,5 @@ public sealed record PurchaseResult(PurchaseStatus Status, long? OrderId = null)
     public static PurchaseResult Success(long orderId) => new(PurchaseStatus.Success, orderId);
     public static readonly PurchaseResult SoldOut = new(PurchaseStatus.SoldOut);
     public static readonly PurchaseResult EventNotFound = new(PurchaseStatus.EventNotFound);
+    public static readonly PurchaseResult Conflict = new(PurchaseStatus.Conflict);
 }

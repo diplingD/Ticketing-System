@@ -36,6 +36,8 @@ public sealed class EventRepository(NpgsqlDataSource dataSource, IOptions<Purcha
             PurchaseStrategy.Naive => PurchaseNaiveAsync(eventId, userId, cancellationToken),
             PurchaseStrategy.ForUpdate => PurchaseForUpdateAsync(eventId, userId, cancellationToken),
             PurchaseStrategy.Atomic => PurchaseAtomicAsync(eventId, userId, cancellationToken),
+            PurchaseStrategy.Optimistic => PurchaseOptimisticAsync(eventId, userId, cancellationToken),
+            PurchaseStrategy.OptimisticRetry => PurchaseOptimisticRetryAsync(eventId, userId, cancellationToken),
             _ => throw new InvalidOperationException($"Unknown purchase strategy {options.Value.Strategy}.")
         };
 
@@ -143,6 +145,65 @@ public sealed class EventRepository(NpgsqlDataSource dataSource, IOptions<Purcha
 
         await transaction.CommitAsync(cancellationToken);   // releases the row lock taken by the UPDATE
         return PurchaseResult.Success(orderId);
+    }
+
+    // OPTIMISTIC LOCKING (no retry)
+    private async Task<PurchaseResult> PurchaseOptimisticAsync(long eventId, string userId, CancellationToken cancellationToken)
+    {
+        await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
+        await using var transaction = await connection.BeginTransactionAsync(cancellationToken);
+
+        // 1. Read the value AND its version. Plain SELECT: no lock, no waiting.
+        var ev = await connection.QuerySingleOrDefaultAsync<Event>(new CommandDefinition(
+            "SELECT available_tickets, version FROM events WHERE id = @eventId",
+            new { eventId }, transaction, cancellationToken: cancellationToken));
+
+        // 2. Check in C#, like the naive version
+        if (ev is null)
+            return PurchaseResult.EventNotFound;
+
+        if (ev.AvailableTickets <= 0)
+            return PurchaseResult.SoldOut;
+
+        // 3. Write only if nobody changed the row since our read (same version), and bump the version.
+        var updatedRows = await connection.ExecuteAsync(new CommandDefinition(
+            """
+            UPDATE events
+            SET available_tickets = @newAvailable, version = version + 1
+            WHERE id = @eventId AND version = @version
+            """,
+            new { eventId, newAvailable = ev.AvailableTickets - 1, version = ev.Version },
+            transaction, cancellationToken: cancellationToken));
+
+        // 0 rows: someone else won the race. No retry here on purpose (we want to see the effect).
+        if (updatedRows == 0)
+            return PurchaseResult.Conflict;
+
+        var orderId = await connection.ExecuteScalarAsync<long>(new CommandDefinition(
+            "INSERT INTO orders (event_id, user_id) VALUES (@eventId, @userId) RETURNING id",
+            new { eventId, userId }, transaction, cancellationToken: cancellationToken));
+
+        await transaction.CommitAsync(cancellationToken);
+        return PurchaseResult.Success(orderId);
+    }
+
+    // OPTIMISTIC LOCKING WITH RETRY
+    private async Task<PurchaseResult> PurchaseOptimisticRetryAsync(long eventId, string userId, CancellationToken cancellationToken)
+    {
+        const int maxAttempts = 5;
+        const int maxJitterMs = 20;     // The random delay (jitter) spreads out the losers, so they don't all collide again at the same moment.
+
+        for (var attempt = 1; ; attempt++)
+        {
+            var result = await PurchaseOptimisticAsync(eventId, userId, cancellationToken);
+
+            // Success, SoldOut and EventNotFound are final answers; only a conflict is worth retrying.
+            if (result.Status != PurchaseStatus.Conflict || attempt == maxAttempts)
+                return result;
+
+            // When PurchaseOptimisticAsync ended with return, the connection went back to the pool, so we don't hold it while waiting.
+            await Task.Delay(Random.Shared.Next(0, maxJitterMs + 1), cancellationToken);
+        }
     }
 
     // Test helper: deletes orders and restores the counter, so load tests can be repeated without "down -v".

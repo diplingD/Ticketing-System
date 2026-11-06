@@ -26,6 +26,7 @@ public sealed class EventsController(IEventService eventService) : ControllerBas
         {
             PurchaseStatus.Success => Ok(new PurchaseResponse(result.OrderId!.Value)),
             PurchaseStatus.SoldOut => Conflict("Sold out."),
+            PurchaseStatus.Conflict => Conflict("Concurrent update, try again."),
             PurchaseStatus.EventNotFound => NotFound(),
             _ => throw new InvalidOperationException($"Unknown purchase status {result.Status}.")
         };

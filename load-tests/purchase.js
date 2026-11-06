@@ -14,8 +14,9 @@ const USERS = Number(__ENV.USERS || 500);
 
 const purchased = new Counter('purchases_ok');
 const soldOut = new Counter('purchases_sold_out');
+const conflicts = new Counter('purchases_conflict'); // optimistic locking: lost the race, ticket may still be free
 
-// 409 "Sold out" is an expected business outcome, not a failure.
+// 409 ("Sold out" or "Concurrent update") is an expected business outcome, not a failure.
 // With this, http_req_failed counts only real failures (5xx, timeouts, 404, 400...).
 http.setResponseCallback(http.expectedStatuses(200, 409));
 
@@ -51,7 +52,8 @@ export default function () {
   check(res, { 'status is 200 or 409': (r) => r.status === 200 || r.status === 409 });
 
   if (res.status === 200) purchased.add(1);
-  else if (res.status === 409) soldOut.add(1);
+  else if (res.status === 409 && res.body.includes('Sold out')) soldOut.add(1);
+  else if (res.status === 409) conflicts.add(1);
 }
 
 // Runs once, after the load: compare orders in the database with the number of tickets.

@@ -7,4 +7,5 @@ public sealed class Event
     public string Name { get; init; } = "";
     public int TotalTickets { get; init; }
     public int AvailableTickets { get; init; }
+    public int Version { get; init; }
 }

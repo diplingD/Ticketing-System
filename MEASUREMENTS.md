@@ -162,3 +162,44 @@ speed differences.
   is no separate `SELECT` and C# check before it.
 
 ---
+
+### Optimistic locking: `version` column
+
+**Change.** No lock on read. Read the value together with its `version`, check in C#, and write only if nobody
+changed the row in the meantime:
+
+```sql
+UPDATE events
+SET available_tickets = @newAvailable, version = version + 1
+WHERE id = @eventId AND version = @version
+```
+
+0 updated rows = someone else won the race → conflict (409 "Concurrent update, try again").
+Two variants: without retry, and with up to 5 retries, each after a random 0–20 ms delay (jitter), so the losers
+don't all collide again at the same moment.
+(Code: `PurchaseOptimisticAsync`, `PurchaseOptimisticRetryAsync`; `PURCHASE_STRATEGY=Optimistic` / `OptimisticRetry`.)
+
+**Result** (500 users):
+
+|Strategy|Sold|`available_tickets` after|200 / sold out / conflict|p95 latency|Throughput|
+|-|-|-|-|-|-|
+|Atomic|100 ✅|0|100 / 400 / —|0.77 s|~535 req/s|
+|Optimistic (no retry)|**23** ❌|**77**|23 / 0 / **477**|0.50 s|~752 req/s|
+|Optimistic + retry|100 ✅|0|100 / 398 / 2|1.29 s|~348 req/s|
+
+* **Without retry: underselling.** Never oversells, but sold only 23 of 100 tickets: 477 buyers were turned away
+  while 77 tickets were still free. Every wave of concurrent reads sees the same `version`, and only one request per
+  wave wins. It looks like the fastest variant only because 95% of the requests did no useful work.
+* **With retry: correct business result** (all 100 sold, only 2 buyers gave up after 5 attempts), but the slowest
+  of the correct variants: the losers repeat the whole read + write several times.
+
+**Trade-off:**
+
+* ✅ No lock while reading; great when conflicts are **rare** (e.g. two users rarely edit the same record).
+* ❌ On a hot row conflicts are the normal case: without retry it undersells, with retry it pays with extra queries
+  and higher latency.
+* ❌ More code: `version` column, retry loop, limit on attempts, jitter.
+* ➖ In Postgres the `UPDATE` still waits for the row lock of a concurrent `UPDATE`; "optimistic" only means the
+  read does not lock.
+
+---

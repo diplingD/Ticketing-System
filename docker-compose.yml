@@ -31,7 +31,7 @@ services:
     environment:
       # Overrides the "Db" connection string; inside the Docker network the database is "db:5432".
       ConnectionStrings__Db: "Host=db;Port=5432;Database=ticketing;Username=ticketing;Password=ticketing"
-      # Which purchase implementation to run (Naive, ForUpdate, Atomic). Switch without rebuilding:
+      # Which purchase implementation to run (Naive, ForUpdate, Atomic, Optimistic, OptimisticRetry). Switch without rebuilding:
       #   $env:PURCHASE_STRATEGY="ForUpdate"; docker compose up -d
       Purchase__Strategy: ${PURCHASE_STRATEGY:-Naive}
     ports:
