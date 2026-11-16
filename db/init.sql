@@ -20,3 +20,8 @@ CREATE INDEX ix_orders_event_id ON orders (event_id);
 -- Test event: 100 tickets for the flash sale.
 INSERT INTO events (name, total_tickets, available_tickets)
 VALUES ('Flash Sale Concert', 100, 100);
+
+-- Event 2: plenty of tickets for the throughput test (load-tests/throughput.js),
+-- so the whole test measures real purchases, not just "sold out" answers.
+INSERT INTO events (name, total_tickets, available_tickets)
+VALUES ('Throughput Test', 100000, 100000);

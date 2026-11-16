@@ -203,3 +203,52 @@ don't all collide again at the same moment.
   read does not lock.
 
 ---
+
+### Throughput comparison: steady load
+
+The burst test above proves correctness, but it lasts ~1 s and its latency varies a lot between runs.
+To compare speed, all variants ran under the same **steady load**: k6 `constant-arrival-rate`, **200 purchases/s
+for 30 s** (`load-tests/throughput.js`), on an event with 100,000 tickets, so every request is a real purchase.
+New requests keep arriving at 200/s no matter how fast the server answers (open model).
+
+|Strategy|Successful purchases/s|p95 latency|Rejected (conflict)|Not sent by k6 (`dropped_iterations`)|Lost updates|
+|-|-|-|-|-|-|
+|Naive|~142|7.33 s|—|730|**4,912** ❌|
+|ForUpdate|~145|6.50 s|—|811|0|
+|**Atomic**|**~159**|4.60 s|—|565|0|
+|Optimistic|~147|**69 ms**|26%|0|0|
+|OptimisticRetry|~74|4.01 s|59%|399|0|
+
+* **`dropped_iterations` = the system is overloaded.** The server could not keep up with the arrival rate, so
+  requests piled up. Each waiting request keeps one k6 VU busy, and we allowed at most 1,000 VUs. At ~5 s latency,
+  200 req/s needs 200 × 5 = **1,000 requests in flight**, which is exactly that limit: from then on k6 had no free VU
+  and skipped scheduled purchases. In real life these are buyers who never got to try, because the site hung.
+* **The limit is the hot row, ~150 writes/s.** Every purchase updates the same `events` row, and Postgres lets only
+  one transaction at a time change a row: the next one waits for the previous `COMMIT`. One purchase
+  (`UPDATE` + `INSERT` + `COMMIT` with a disk flush) takes ~6–7 ms, so one row handles about **150 purchases/s**.
+  Every variant hit roughly that number, no matter how it locks. It is not the API (0.5 CPU): Optimistic pushed all
+  200 req/s through the same API with 69 ms p95.
+* **The difference is what happens to the excess** (200 − ~150 req/s). Locking variants **queue** it: the queue grows
+  for the whole test and p95 climbs to 5–7 s. Optimistic **rejects** it immediately: p95 69 ms, but 26% of buyers
+  were turned away while tickets were still available.
+* **Naive lost 93% of its writes**: 5,271 orders, but the counter dropped only 359 times. No errors anywhere.
+* **Retry under overload makes things worse**: each rejected request came back up to 5 times, multiplying the load
+  on the hot row. OptimisticRetry sold **half** as much as Optimistic without retry, with 60× higher latency
+  (a small retry storm).
+* **Atomic is the best fit** here: correct, simplest and the highest throughput, because it holds the row lock for
+  the shortest time.
+
+**Going beyond ~150 purchases/s needs a different data model, not a different lock.** All variants only change *how*
+requests wait for the single row; none removes the fact that everyone writes to it. Options that remove (or relieve)
+that single contention point:
+
+* **One row per ticket:** a `tickets` table with 100,000 rows; a buyer takes the first free one with
+  `FOR UPDATE SKIP LOCKED`. Buyers lock *different* rows and run in parallel; locked rows are skipped, not waited for.
+* **Sharded counter:** split the stock into e.g. 10 counter rows of 10,000; each buyer picks one at random.
+  10 hot rows instead of 1 → roughly 10× the capacity.
+* **Counter in Redis** (Phase 3): an in-memory atomic `DECR`, the database is updated afterwards.
+  Tens of thousands of operations per second, no disk flush per purchase.
+* **Queue** (Phase 4): accept the request immediately, a worker processes purchases in batches,
+  e.g. one `UPDATE` and one `COMMIT` for 100 purchases instead of 100 commits.
+
+---
