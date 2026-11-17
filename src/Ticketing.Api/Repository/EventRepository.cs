@@ -41,9 +41,7 @@ public sealed class EventRepository(NpgsqlDataSource dataSource, IOptions<Purcha
             _ => throw new InvalidOperationException($"Unknown purchase strategy {options.Value.Strategy}.")
         };
 
-    // NAIVE on purpose (Phase 1 starting point): read -> check in app -> write the computed value.
-    // The transaction does NOT protect us: under READ COMMITTED two requests can both read
-    // available = 1, both pass the check, and both write 0 (lost update) -> two orders for one ticket.
+    // NAIVE on purpose
     private async Task<PurchaseResult> PurchaseNaiveAsync(long eventId, string userId, CancellationToken cancellationToken)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
@@ -75,9 +73,7 @@ public sealed class EventRepository(NpgsqlDataSource dataSource, IOptions<Purcha
         return PurchaseResult.Success(orderId);
     }
 
-    // PESSIMISTIC LOCKING: the same read -> check -> write, but the read locks the row (FOR UPDATE).
-    // A second transaction blocks on its SELECT until the first one commits, then reads the fresh value.
-    // Correct, but every purchase (and every "sold out" answer) waits in one queue for the same row.
+    // PESSIMISTIC LOCKING
     private async Task<PurchaseResult> PurchaseForUpdateAsync(long eventId, string userId, CancellationToken cancellationToken)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);
@@ -108,9 +104,7 @@ public sealed class EventRepository(NpgsqlDataSource dataSource, IOptions<Purcha
         return PurchaseResult.Success(orderId);
     }
 
-    // ATOMIC UPDATE: no separate read. The check (WHERE) and the write (SET) are one statement.
-    // If two requests race for the last ticket, the second one waits for the row lock and then
-    // Postgres re-checks the WHERE on the fresh row: available is 0, so it updates 0 rows -> sold out.
+    // ATOMIC UPDATE
     private async Task<PurchaseResult> PurchaseAtomicAsync(long eventId, string userId, CancellationToken cancellationToken)
     {
         await using var connection = await dataSource.OpenConnectionAsync(cancellationToken);

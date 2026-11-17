@@ -57,6 +57,29 @@ services:
     depends_on:
       - api
 
+  # Exposes database-side metrics (connections by state, locks, max_connections...) on :9187/metrics.
+  # Prometheus scrapes it like the API
+  postgres-exporter:
+    image: quay.io/prometheuscommunity/postgres-exporter:v0.16.0
+    container_name: ticketing-postgres-exporter
+    environment:
+      DATA_SOURCE_NAME: "postgresql://ticketing:ticketing@db:5432/ticketing?sslmode=disable"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  # Dashboards on top of Prometheus. UI: http://localhost:3000 (login admin / admin, "Skip" the password change).
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: ticketing-grafana
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+
   # Load testing tool. The "tools" profile keeps it out of "docker compose up";
   # it runs only on demand: docker compose run --rm k6 run /scripts/purchase.js
   k6:

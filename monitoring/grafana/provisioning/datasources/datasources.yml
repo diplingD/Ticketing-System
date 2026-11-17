@@ -1,0 +1,12 @@
+# Grafana reads this file on startup to see where Prometheus is, and creates the data source automatically (no clicking in the UI).
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: prometheus              # fixed id, so dashboards saved to the repo can reference it
+    url: http://prometheus:9090  # Prometheus inside the Docker network
+    access: proxy                # Grafana server queries Prometheus, not the browser
+    isDefault: true
+    jsonData:
+      timeInterval: 1s           # matches scrape_interval in prometheus.yml

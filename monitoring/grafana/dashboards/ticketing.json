@@ -1,0 +1,103 @@
+{
+  "uid": "ticketing",
+  "title": "Ticketing",
+  "schemaVersion": 39,
+  "time": { "from": "now-5m", "to": "now" },
+  "refresh": "5s",
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Requests/s by status code",
+      "description": "API requests per second (only /events endpoints), split by HTTP status code.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (code) (rate(http_request_duration_seconds_count{endpoint=~\"events.*\"}[5s]))",
+          "legendFormat": "{{code}}"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Latency (p50 / p95 / p99)",
+      "description": "How long API requests take, measured inside the API. Buckets double in size (..., 0.5 s, 1 s, 2 s, 4 s ...), so values are approximate.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(http_request_duration_seconds_bucket{endpoint=~\"events.*\"}[5s])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{endpoint=~\"events.*\"}[5s])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket{endpoint=~\"events.*\"}[5s])))",
+          "legendFormat": "p99"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "API: requests in flight vs. pool connections",
+      "description": "Requests in flight = requests the API is working on right now. Pool used = how many of them hold a DB connection. The gap between the two = requests waiting for a free connection.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(http_requests_in_progress{endpoint=~\"events.*\"})",
+          "legendFormat": "requests in flight"
+        },
+        {
+          "refId": "B",
+          "expr": "sum(npgsql_db_client_connection_count{db_client_connection_state=\"used\"})",
+          "legendFormat": "pool used"
+        },
+        {
+          "refId": "C",
+          "expr": "sum(npgsql_db_client_connection_count{db_client_connection_state=\"idle\"})",
+          "legendFormat": "pool idle"
+        },
+        {
+          "refId": "D",
+          "expr": "sum(npgsql_db_client_connection_max)",
+          "legendFormat": "pool max"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Postgres: connections by state",
+      "description": "What the database sees. active = running a query (or waiting for a lock), idle = open but unused, idle in transaction = inside a transaction, waiting for the app. max_connections = the database limit.",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (state) (pg_stat_activity_count{datname=\"ticketing\", state=~\"active|idle|idle in transaction\"})",
+          "legendFormat": "{{state}}"
+        },
+        {
+          "refId": "B",
+          "expr": "max(pg_settings_max_connections)",
+          "legendFormat": "max_connections"
+        }
+      ]
+    }
+  ]
+}
