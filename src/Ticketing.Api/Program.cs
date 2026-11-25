@@ -38,6 +38,21 @@ app.UseRouting();
 // Counts requests and measures their duration (histogram) for every endpoint, labeled by status code.
 app.UseHttpMetrics();
 
+// Turns an unhandled exception into a 500 inside UseHttpMetrics, so the metric records code="500".
+// Without this, prometheus-net records the request before Kestrel sets the 500, so it is counted as 200.
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next(context);
+    }
+    catch (Exception ex) when (!context.Response.HasStarted)
+    {
+        app.Logger.LogError(ex, "Unhandled exception for {Path}", context.Request.Path);
+        context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+    }
+});
+
 app.MapControllers();
 app.MapHealthChecks("/health");
 // GET /metrics: text format that Prometheus scrapes.

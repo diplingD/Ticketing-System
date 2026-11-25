@@ -252,3 +252,142 @@ that single contention point:
   e.g. one `UPDATE` and one `COMMIT` for 100 purchases instead of 100 commits.
 
 ---
+
+## Phase 2: Database connections
+
+**Load** (`load-tests/read.js`): a steady stream of `GET /events/1` (k6 `constant-arrival-rate`, 30 s).
+Reads take no row locks, so there is no hot row: every request does real work on its own DB connection.
+API: 0.5 CPU / 256 MB, Postgres: 1 CPU / 512 MB, Npgsql pool: default (max 100), Postgres `max_connections`: 100.
+
+### Baseline: API with 0.5 CPU
+
+|Rate sent|Served/s|p50|p95|Failed|Not sent by k6 (`dropped_iterations`)|
+|-|-|-|-|-|-|
+|200/s|200|1.1 ms|1.6 ms|0|0|
+|1000/s|~265|15.2 s|21.9 s|10.7% (1,146)|19,268 (64% of planned)|
+
+**At 200/s** the system is idle.
+
+**At 1000/s** it collapses. Errors in the API log:
+
+|Count|Error|Meaning|
+|-|-|-|
+|1,110|`The connection pool has been exhausted ... 'Timeout' (currently 15 seconds)`|waited 15 s for a free pool connection, gave up|
+|36|`53300: sorry, too many clients already`|Postgres refused a new connection|
+
+What Grafana / Prometheus showed at the peak:
+
+|Metric|Max during the test|
+|-|-|
+|Requests in flight in the API|5,000 (every k6 VU stuck waiting)|
+|Pool connections in use|100 (full)|
+|Postgres connections `active` (running a query)|~8|
+|Postgres connections `idle`|up to ~98|
+|API CPU|0.54 of 0.5 cores (at the limit)|
+
+**The bottleneck is the API CPU, not the database.** The pool was full, but on the database side almost every
+connection was `idle`. Why a slow CPU fills the pool:
+
+1. The request borrows a connection from the pool and sends the query. On `await` it releases the CPU (that's the point of async).
+2. The database answers in ~1 ms. The response sits in the network buffer; nobody has read it yet.
+3. The code after the `await` need to read the bytes, map the row, return the connection to the pool - it needs CPU for that.
+4. The CPU is busy with thousands of other requests, so this continuation waits in the .NET thread pool queue.
+5. All this time the connection stays borrowed: the database is done, the connection is `idle` in Postgres,
+   but "used" in the pool.
+
+**The full pool was a symptom; a bigger pool would only add more idle
+connections.**
+
+* **Latency is queueing, not work.** The read itself still takes ~1 ms. 1000 req/s arrive, ~265 req/s are served,
+  so the queue grows by ~735 requests every second and every new request waits longer, until it hits the 15 s pool
+  `Timeout`. That is why the median is ~15 s. For the user it does not matter where the wait is: the page is slow.
+  A 15 s answer is worse than a fast error, because it keeps using resources for a user who has already left.
+* **Pool size must fit the database limit.** The pool may open 100 connections, but Postgres keeps 3 slots for
+  superusers and `postgres-exporter` holds one, so only ~96 are available. With several API instances
+  (N × pool size) this gets much worse.
+* **`GET /events/{id}` borrows a connection twice** (one for the event, one for the order count), so under load
+  every request waits in the pool queue twice. Noted, not fixed yet.
+
+---
+
+### API with 2 CPUs
+
+**Change.** API CPU limit `0.5` → `2` (`docker-compose.yml`). Same test: `read.js`, 1000 req/s for 30 s.
+
+|API CPU|Served/s|p50|p95|Failed|Not sent by k6 (`dropped_iterations`)|
+|-|-|-|-|-|-|
+|0.5|~265|15.2 s|21.9 s|10.7%|19,268|
+|**2**|**~388**|**9.8 s**|**16.7 s**|**1.0%** (141)|15,366|
+
+Better (+46%), but still far from 1000 req/s. Grafana looked the same as before: pool full (100), Postgres
+connections mostly `idle` (~99), `active` only 1–13. But this time the API was not busy either: 0.5–0.7 of its
+2 cores, no thread pool queue. The answer was in the CPU throttling stats of the containers (cgroup `cpu.stat`):
+
+|Container|CPU limit|Periods (100 ms) throttled by the limit|
+|-|-|-|
+|`ticketing-api`|2|2 (practically never)|
+|`ticketing-db`|1|774 ≈ 77 s, i.e. the whole duration of two test runs|
+
+**The bottleneck moved to the database CPU.** Fixing one bottleneck exposes the next one. (The pool size
+experiment below shows where that CPU went: mostly to opening new connections, not to queries.)
+
+**`idle` in Postgres has two possible causes.** `pg_stat_activity` marks a connection `active` only once its
+backend process has *read* the query and started executing it. So the same picture had two different reasons:
+
+|Test|Where the query is|Who is late|
+|-|-|-|
+|API 0.5 CPU|the database has **finished**, the answer waits for the API to read it|the API (no CPU)|
+|API 2 CPU|the query has **arrived** in the database, but the backend has not read it yet|the database (no CPU)|
+
+
+
+---
+
+### Pool size:
+
+**Change.** Npgsql `Maximum Pool Size` in the API (`DB_POOL_SIZE` in `docker-compose.yml`). This is the API-side
+limit: how many connections one API instance may open. Postgres `max_connections` stays at 100, of which ~96 are
+available to the API (3 reserved for superusers, 1 used by `postgres-exporter`).
+
+Same test: `read.js`, 1000 req/s for 30 s, API 2 CPUs. Each pool size was measured on a second run, after a
+warm-up run (the first seconds after an API restart are slow: JIT compilation, empty pool).
+
+|Pool size|Served/s|p95|Failed|Not sent (`dropped_iterations`)|New connections opened during the test|
+|-|-|-|-|-|-|
+|100|~660|8.05 s|32|6,193|~2,700|
+|90|1000|1.33 ms|0|0|0|
+|50|1000|1.3 ms|0|0|0|
+|20|1000|1.27 ms|0|0|0|
+|5|1000|1.26 ms|0|0|0|
+
+**Pool 90 works, pool 100 collapses: 10 connections of difference.** The problem is not "many connections", but a
+pool above the database limit.
+
+**Pool 90:**
+1. At the start the API opens up to 90 connections, once.
+2. After that it only reuses them: a request takes a connection, the query takes ~1 ms, it returns the connection,
+   and the next request takes the same one.
+3. 90 < the database limit (~96), so the database never refuses and nobody tries to open new ones.
+4. The database CPU goes only to queries, so 1000 req/s passes easily.
+
+**Pool 100:** the pool knows only its own limit, not the database's. With ~96 connections open it believes it still
+has room (96 < 100), so a request that finds all connections busy does not wait in line: the pool tries to
+**open a new connection**. Postgres starts a new backend process for every attempt; some are refused
+(`too many clients`). **One query costs a fraction of a millisecond of database CPU; opening a connection costs
+many times more.** 
+
+**Why it gets there at all.** Normal traffic needs only 1–2 connections, so pool 100 should never reach the
+limit. But short slowdowns always happen (cold start, GC pause, a busy host), and for a moment requests pile up.
+Pool 90 hits its own limit, the extra requests wait in line, and the system recovers within a second. Pool 100
+starts opening connections, which slows the database, which piles up even more requests: the same small push
+leaves it stuck in the bad state (a *metastable failure*).
+
+**Fix:** keep the pool size, summed over all API instances, below `max_connections`. With 2 instances of pool 90 the
+database would see 180 connections and collapse the same way, so with autoscaling the pool must be sized for the
+maximum number of instances, or a pooler such as PgBouncer goes in front of the database.
+
+**Trade-off:** a small pool protects the database, but caps how much work one instance can send to it. With slower
+queries or a much higher load, a pool that is too small becomes the bottleneck itself (requests wait in the API
+for a connection). We did not reach that point: at 1000 req/s even pool 5 had spare connections.
+
+---

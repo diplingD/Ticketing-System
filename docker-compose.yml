@@ -30,7 +30,9 @@ services:
     container_name: ticketing-api
     environment:
       # Overrides the "Db" connection string; inside the Docker network the database is "db:5432".
-      ConnectionStrings__Db: "Host=db;Port=5432;Database=ticketing;Username=ticketing;Password=ticketing"
+      # Maximum Pool Size = max DB connections this API instance opens (Npgsql default 100). Switch without rebuilding:
+      #   $env:DB_POOL_SIZE="20"; docker compose up -d
+      ConnectionStrings__Db: "Host=db;Port=5432;Database=ticketing;Username=ticketing;Password=ticketing;Maximum Pool Size=${DB_POOL_SIZE:-100}"
       # Which purchase implementation to run (Naive, ForUpdate, Atomic, Optimistic, OptimisticRetry). Switch without rebuilding:
       #   $env:PURCHASE_STRATEGY="ForUpdate"; docker compose up -d
       Purchase__Strategy: ${PURCHASE_STRATEGY:-Naive}
@@ -42,7 +44,7 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "0.5"
+          cpus: "2"   # Phase 2: was 0.5, the API CPU was the bottleneck for reads
           memory: 256M
 
   # Collects metrics: every scrape_interval it calls /metrics on each target and stores the time series.

@@ -2,7 +2,10 @@
   "uid": "ticketing",
   "title": "Ticketing",
   "schemaVersion": 39,
-  "time": { "from": "now-5m", "to": "now" },
+  "time": {
+    "from": "now-5m",
+    "to": "now"
+  },
   "refresh": "5s",
   "panels": [
     {
@@ -10,9 +13,22 @@
       "type": "timeseries",
       "title": "Requests/s by status code",
       "description": "API requests per second (only /events endpoints), split by HTTP status code.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "x": 0, "y": 0, "w": 12, "h": 8 },
-      "fieldConfig": { "defaults": { "unit": "reqps" }, "overrides": [] },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
       "targets": [
         {
           "refId": "A",
@@ -26,9 +42,22 @@
       "type": "timeseries",
       "title": "Latency (p50 / p95 / p99)",
       "description": "How long API requests take, measured inside the API. Buckets double in size (..., 0.5 s, 1 s, 2 s, 4 s ...), so values are approximate.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "x": 12, "y": 0, "w": 12, "h": 8 },
-      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 0,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
       "targets": [
         {
           "refId": "A",
@@ -52,9 +81,22 @@
       "type": "timeseries",
       "title": "API: requests in flight vs. pool connections",
       "description": "Requests in flight = requests the API is working on right now. Pool used = how many of them hold a DB connection. The gap between the two = requests waiting for a free connection.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "x": 0, "y": 8, "w": 12, "h": 8 },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
       "targets": [
         {
           "refId": "A",
@@ -83,9 +125,22 @@
       "type": "timeseries",
       "title": "Postgres: connections by state",
       "description": "What the database sees. active = running a query (or waiting for a lock), idle = open but unused, idle in transaction = inside a transaction, waiting for the app. max_connections = the database limit.",
-      "datasource": { "type": "prometheus", "uid": "prometheus" },
-      "gridPos": { "x": 12, "y": 8, "w": 12, "h": 8 },
-      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 8,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
       "targets": [
         {
           "refId": "A",
@@ -96,6 +151,36 @@
           "refId": "B",
           "expr": "max(pg_settings_max_connections)",
           "legendFormat": "max_connections"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "API: CPU (cores used)",
+      "description": "CPU used by the API process, in cores. Compare with the cpus limit for the api service in docker-compose.yml: a line stuck at the limit means the API is the bottleneck.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(process_cpu_seconds_total{job=\"api\"}[5s])",
+          "legendFormat": "cpu cores"
         }
       ]
     }
