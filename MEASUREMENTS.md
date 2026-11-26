@@ -391,3 +391,44 @@ queries or a much higher load, a pool that is too small becomes the bottleneck i
 for a connection). We did not reach that point: at 1000 req/s even pool 5 had spare connections.
 
 ---
+
+### Two API instances, pool 90 each
+
+**Change.** `docker compose up -d --scale api=2` with `DB_POOL_SIZE=90`. Each pool is below the database limit
+(90 < ~96), but together they are not (90 + 90 = 180). Same test: `read.js`, 1000 req/s for 30 s, warm run.
+
+|Instances × pool|Served/s|p95|Failed|Not sent (`dropped_iterations`)|
+|-|-|-|-|-|
+|1 × 90|1000|1.33 ms|0|0|
+|2 × 90|~789|8.63 s|1,636 (5.6%)|713|
+
+**Traffic was not split evenly.** One instance got ~90% of the requests, the other ~10%. Docker DNS is not a real
+load balancer (I did not check why the split was this uneven).
+
+**All failures were on the instance with less traffic.** The busy instance took up to 90 connections, so the other
+one found only a few free slots in the database. Its requests failed in two ways:
+- 1,188 × `53300 too many clients`: the DATABASE refused a new connection;
+- 448 × timeout: waited for a connection from ITS OWN POOL and gave up.
+
+**The whole database slowed down, not only the second instance.** 
+
+---
+
+### PgBouncer in front of the database
+
+**Change.** A PgBouncer container between the API and Postgres (`DB_HOST=pgbouncer`), transaction mode, 20 real
+connections to Postgres (`DEFAULT_POOL_SIZE`). The API pools stay at 90 each, but now they connect to PgBouncer,
+not to the database. No code change; same test: 2 instances × pool 90, `read.js`, 1000 req/s for 30 s, warm run.
+
+|2 instances × pool 90|Served/s|p95|Failed|Not sent (`dropped_iterations`)|
+|-|-|-|-|-|
+|directly to Postgres|~789|8.63 s|1,636 (5.6%)|713|
+|through PgBouncer|1000|2.16 ms|0|0|
+
+- The API instances opened up to ~80 connections to PgBouncer in total. Postgres saw at most **20**, and PgBouncer
+  never opened more than those 20: no new backend processes during the test.
+- When it is busy, requests wait in PgBouncer (cheap) instead of opening new connections in Postgres (expensive).
+
+**Trade-off:** one more service to run (and a single point of failure, unless it runs as several instances).
+
+---

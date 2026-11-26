@@ -6,7 +6,7 @@ resource-limited containers, and only then fixed and measured again.
 
 All experiments and numbers are in [MEASUREMENTS.md](MEASUREMENTS.md).
 
-**Stack:** .NET 8 Web API · PostgreSQL 16 (Npgsql + Dapper, plain SQL, no ORM) · Docker Compose · k6 · Prometheus
+**Stack:** .NET 8 Web API · PostgreSQL 16 (Npgsql + Dapper, plain SQL, no ORM) · Docker Compose · k6 · Prometheus · Grafana · PgBouncer
 
 ## Running & measuring
 
@@ -21,13 +21,17 @@ Grafana dashboard: http://localhost:3000/d/ticketing (login `admin` / `admin`).
 If port 5432 is already taken by a local Postgres, put `DB_HOST_PORT=5433` in a `.env` file next to
 `docker-compose.yml`.
 
-**Settings.** Two environment variables configure the API. Set them, then run `docker compose up -d` to restart the
+**Settings.** Three environment variables configure the API. Set them, then run `docker compose up -d` to restart the
 API with the new value (no rebuild). They stay set until you close that PowerShell window.
 
 |Variable|Default|Values|Matters for|
 |-|-|-|-|
 |`PURCHASE_STRATEGY`|`Naive`|`Naive`, `ForUpdate`, `Atomic`, `Optimistic`, `OptimisticRetry`|purchase tests (Phase 1)|
 |`DB_POOL_SIZE`|`100`|any number|read test (Phase 2)|
+|`DB_HOST`|`db`|`db` (directly to Postgres), `pgbouncer` (through PgBouncer)|read test (Phase 2)|
+
+**Two API instances:** add `--scale api=2` to `docker compose up` (ports 8080 and 8081). Every `up` without it
+goes back to one instance, and so does `docker compose run k6` unless it has `--no-deps`.
 
 **Load tests** (k6, runs in Docker):
 
@@ -48,6 +52,10 @@ docker compose run --rm k6 run -e RATE=200 /scripts/throughput.js
 # Phase 2: pool size
 $env:DB_POOL_SIZE="50"; docker compose up -d
 docker compose run --rm k6 run -e RATE=1000 /scripts/read.js
+
+# Phase 2: two API instances through PgBouncer
+$env:DB_POOL_SIZE="90"; $env:DB_HOST="pgbouncer"; docker compose up -d --scale api=2
+docker compose run --rm --no-deps k6 run -e RATE=1000 /scripts/read.js
 ```
 
 The first run after the API restarts is slow (warm-up), so run each test twice and keep the second result.
@@ -61,7 +69,7 @@ Details in [MEASUREMENTS.md](MEASUREMENTS.md).
 
 - [x] Phase 0: baseline (schema, API, Docker, k6, Prometheus)
 - [x] Phase 1: race condition and overselling
-- [ ] Phase 2: database connections, pool size, PgBouncer (+ Grafana)
+- [x] Phase 2: database connections, pool size, PgBouncer
 - [ ] Phase 3: Redis (inventory counter, caching, cache stampede)
 - [ ] Phase 4: queue (RabbitMQ), duplicate processing, idempotency
 - [ ] Phase 5: multiple instances behind nginx, rate limiting, timeouts, retries, circuit breaker

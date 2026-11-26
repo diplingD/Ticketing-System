@@ -25,27 +25,47 @@ services:
           cpus: "1"
           memory: 512M
 
+  # No container_name: it must be unique, so it would block "docker compose up -d --scale api=2".
+  # Docker names the instances ticketingsystem-api-1, -2, ...
   api:
     build: ./src/Ticketing.Api
-    container_name: ticketing-api
     environment:
       # Overrides the "Db" connection string; inside the Docker network the database is "db:5432".
       # Maximum Pool Size = max DB connections this API instance opens (Npgsql default 100). Switch without rebuilding:
       #   $env:DB_POOL_SIZE="20"; docker compose up -d
-      ConnectionStrings__Db: "Host=db;Port=5432;Database=ticketing;Username=ticketing;Password=ticketing;Maximum Pool Size=${DB_POOL_SIZE:-100}"
+      # Host = where the API connects: db (directly to Postgres, default) or pgbouncer (through the pooler):
+      #   $env:DB_HOST="pgbouncer"; docker compose up -d --scale api=2
+      ConnectionStrings__Db: "Host=${DB_HOST:-db};Port=5432;Database=ticketing;Username=ticketing;Password=ticketing;Maximum Pool Size=${DB_POOL_SIZE:-100}"
       # Which purchase implementation to run (Naive, ForUpdate, Atomic, Optimistic, OptimisticRetry). Switch without rebuilding:
       #   $env:PURCHASE_STRATEGY="ForUpdate"; docker compose up -d
       Purchase__Strategy: ${PURCHASE_STRATEGY:-Naive}
     ports:
-      - "8080:8080"
+      - "8080-8081:8080"   # a port range: with --scale api=2 the first instance gets 8080, the second 8081
     depends_on:
       db:
         condition: service_healthy
+      pgbouncer:
+        condition: service_started
     deploy:
       resources:
         limits:
           cpus: "2"   # Phase 2: was 0.5, the API CPU was the bottleneck for reads
           memory: 256M
+
+  # Connection pooler between the API and Postgres. The API instances open many cheap connections to PgBouncer;
+  # PgBouncer keeps only DEFAULT_POOL_SIZE real connections to Postgres and lends them out per transaction.
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.25.2-p0
+    container_name: ticketing-pgbouncer
+    environment:
+      DATABASE_URL: "postgres://ticketing:ticketing@db:5432/ticketing"
+      AUTH_TYPE: scram-sha-256   # same as Postgres 16
+      POOL_MODE: transaction     # a real connection is held only for one transaction, then given to someone else
+      MAX_CLIENT_CONN: 1000      # connections the API instances may open to PgBouncer (cheap, no Postgres process)
+      DEFAULT_POOL_SIZE: 20      # real connections PgBouncer opens to Postgres (well below ~96)
+    depends_on:
+      db:
+        condition: service_healthy
 
   # Collects metrics: every scrape_interval it calls /metrics on each target and stores the time series.
   # UI: http://localhost:9090

@@ -180,7 +180,37 @@
         {
           "refId": "A",
           "expr": "rate(process_cpu_seconds_total{job=\"api\"}[5s])",
-          "legendFormat": "cpu cores"
+          "legendFormat": "{{instance}}"
+        }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "API: requests/s per instance",
+      "description": "Requests per second handled by each API instance (only /events endpoints). With --scale api=2 there are two lines: shows how evenly the load is split.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "min": 0
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (instance) (rate(http_request_duration_seconds_count{endpoint=~\"events.*\"}[5s]))",
+          "legendFormat": "{{instance}}"
         }
       ]
     }
