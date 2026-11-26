@@ -65,11 +65,14 @@ Purchase tests reset the event first and print a `RESULT ...` line at the end.
 
 Details in [MEASUREMENTS.md](MEASUREMENTS.md).
 
-## Roadmap
+## Phases
 
-- [x] Phase 0: baseline (schema, API, Docker, k6, Prometheus)
-- [x] Phase 1: race condition and overselling
-- [x] Phase 2: database connections, pool size, PgBouncer
-- [ ] Phase 3: Redis (inventory counter, caching, cache stampede)
-- [ ] Phase 4: queue (RabbitMQ), duplicate processing, idempotency
-- [ ] Phase 5: multiple instances behind nginx, rate limiting, timeouts, retries, circuit breaker
+- Phase 0: baseline (schema, API, Docker, k6, Prometheus)
+- Phase 1: race condition and overselling
+- Phase 2: database connections, pool size, PgBouncer
+
+## Future improvements
+
+- Redis: inventory counter, caching, cache stampede
+- Queue (RabbitMQ): duplicate processing, idempotency
+- Multiple instances behind nginx: rate limiting, timeouts, retries, circuit breaker
